@@ -5,17 +5,15 @@ Scans the LP Slack workspace for stake solicitation messages.
 Sends TEST MODE alerts as a DM to Rachel in the internal workspace.
 """
 
-import re
-import time
-import requests
+import os, re, time, requests
 from datetime import datetime, timedelta
-
+```
 # ──────────────────────────────────────────────
 # CONFIGURATION — fill these in before running
 # ──────────────────────────────────────────────
 
-LP_BOT_TOKEN = "PASTE_YOUR_LP_BOT_TOKEN_HERE"         # xoxb- token for stage2capitalnetwork
-INTERNAL_BOT_TOKEN = "PASTE_YOUR_INTERNAL_BOT_TOKEN_HERE"  # xoxb- token for internal Stage 2 workspace
+LP_BOT_TOKEN = os.environ.get("LP_BOT_TOKEN")
+INTERNAL_BOT_TOKEN = os.environ.get("INTERNAL_BOT_TOKEN")
 
 # TEST MODE settings (default)
 MODE = "TEST"
