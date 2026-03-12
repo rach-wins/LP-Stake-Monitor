@@ -1,0 +1,20 @@
+name: LP Stake Monitor
+
+on:
+  schedule:
+    - cron: '0 14 * * 1-5'  # Runs Monday-Friday at 9am EST
+  workflow_dispatch:          # Allows manual runs anytime
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - run: python lp_stake_monitor.py
+        env:
+          LP_BOT_TOKEN: ${{ secrets.LP_BOT_TOKEN }}
+          INTERNAL_BOT_TOKEN: ${{ secrets.INTERNAL_BOT_TOKEN }}
