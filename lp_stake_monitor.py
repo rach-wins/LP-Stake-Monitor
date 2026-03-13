@@ -2,22 +2,24 @@ import os
 import re
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-LP_BOT_TOKEN = os.environ.get("LP_BOT_TOKEN")
-INTERNAL_BOT_TOKEN = os.environ.get("INTERNAL_BOT_TOKEN")
+# ── Tokens (set via environment variables) ───────────────────────────────────
+LP_BOT_TOKEN      = os.environ.get("LP_BOT_TOKEN")       # stage2capitalnetwork bot
+INTERNAL_BOT_TOKEN = os.environ.get("INTERNAL_BOT_TOKEN") # internal Stage 2 workspace bot
 
-MODE = "TEST"
-TEST_ALERT_RECIPIENT = "U0AHBNBRRB4"
-PROD_CHANNEL = "C0ALNN4UBG9"
-PROD_TAG_JAY = "U025X676RHP"
-PROD_TAG_SEAN = "U025FFFH7AR"
-SCAN_DAYS = 180
+# ── Config ────────────────────────────────────────────────────────────────────
+MODE         = os.environ.get("SCAN_MODE", "TEST").upper()   # "TEST" or "PRODUCTION"
+ALERT_CHANNEL = "C0ALNN4UBG9"                                # #lp-stake-monitor (both modes)
+SCAN_DAYS    = int(os.environ.get("SCAN_DAYS", 1))           # default 1 day per spec
 
+# ── Detection patterns ────────────────────────────────────────────────────────
 HIGH_PATTERNS = [
-    r'\b(sell|selling|sale)\b.{0,40}\b(my|our)\b.{0,20}\b(lp|stake|position|interest|shares)\b',
+    # Exclude 'secondary sale' context — that's a MEDIUM signal, not HIGH
+    r'(?<!secondary )\b(sell|selling|sale)\b.{0,40}\b(my|our)\b.{0,20}\b(lp|stake|position|interest|shares)\b',
     r'\b(my|our)\b.{0,20}\b(lp|stake|position|interest|shares)\b.{0,40}\b(sell|selling|for sale|sale)\b',
-    r'\banyone (want|interested).{0,30}\b(buy|purchase)\b.{0,30}\b(lp|stake|position|interest)\b',
+    # Include 'buying' variant — 'anyone interested in buying my LP' is HIGH
+    r'\banyone (want|interested).{0,30}\b(buy|buying|purchase)\b.{0,30}\b(lp|stake|position|interest)\b',
     r'\b(lp|stake|position|interest).{0,30}\bfor sale\b',
     r'\boffer(ing)?\b.{0,30}\b(my|our).{0,20}\b(position|stake|interest)\b',
     r'\blooking to (sell|offload|transfer|liquidate)\b.{0,40}\b(lp|stake|position|interest|fund)\b',
@@ -53,7 +55,7 @@ SAFE_PATTERNS = [
     r'\bfuture fund\b',
 ]
 
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def slack_get(token, endpoint, params=None):
     url = "https://slack.com/api/" + endpoint
     headers = {"Authorization": "Bearer " + token}
@@ -83,11 +85,14 @@ def ts_to_permalink(channel_id, ts):
 
 
 def ts_to_datetime(ts):
-    return datetime.utcfromtimestamp(float(ts)).strftime("%b %d, %Y %I:%M %p UTC")
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%b %d, %Y %I:%M %p UTC")
 
 
+# ── Detection ─────────────────────────────────────────────────────────────────
 def check_message(text):
+    """Return (confidence, reason) or (None, None) if no flag."""
     text_lower = text.lower()
+    # Safe patterns override everything — skip if matched
     for pat in SAFE_PATTERNS:
         if re.search(pat, text_lower):
             return None, None
@@ -103,13 +108,15 @@ def check_message(text):
     return None, None
 
 
+# ── Alert builder ─────────────────────────────────────────────────────────────
 def build_alert(display_name, user_id, channel_name, channel_id, ts, text, confidence, reason):
-    dt = ts_to_datetime(ts)
+    dt   = ts_to_datetime(ts)
     link = ts_to_permalink(channel_id, ts)
+
     if MODE == "TEST":
         return (
             "🧪 *[TEST MODE] LP Stake Solicitation Detected*\n"
-            "_This is a test alert — only visible to you. Switch to production when ready._\n\n"
+            "_This is a test alert. Switch to production when ready._\n\n"
             "*Poster:* " + display_name + " (" + user_id + ")\n"
             "*Channel:* #" + channel_name + "\n"
             "*Timestamp:* " + dt + "\n"
@@ -122,7 +129,6 @@ def build_alert(display_name, user_id, channel_name, channel_id, ts, text, confi
     else:
         return (
             "🚨 *LP Stake Solicitation Detected* 🚨\n\n"
-            "<@" + PROD_TAG_JAY + "> <@" + PROD_TAG_SEAN + "> — action needed.\n\n"
             "*Poster:* " + display_name + " (" + user_id + ")\n"
             "*Channel:* #" + channel_name + "\n"
             "*Timestamp:* " + dt + "\n"
@@ -134,27 +140,27 @@ def build_alert(display_name, user_id, channel_name, channel_id, ts, text, confi
         )
 
 
+# ── Alert sender ──────────────────────────────────────────────────────────────
 def send_alert(alert_text):
-    if MODE == "TEST":
-        dest = TEST_ALERT_RECIPIENT
-    else:
-        dest = PROD_CHANNEL
+    """Always posts to #lp-stake-monitor regardless of mode."""
     result = slack_post(INTERNAL_BOT_TOKEN, "chat.postMessage", {
-        "channel": dest,
+        "channel": ALERT_CHANNEL,
         "text": alert_text,
         "mrkdwn": True
     })
     return result.get("ok", False)
 
 
+# ── Main scan ─────────────────────────────────────────────────────────────────
 def run_scan():
     print("=" * 60)
     print("  LP Stake Monitor — Stage 2 Capital")
-    print("  Mode: " + MODE + " | Scan window: Last " + str(SCAN_DAYS) + " days")
+    print("  Mode: " + MODE + " | Scan window: Last " + str(SCAN_DAYS) + " day(s)")
     print("=" * 60)
 
     oldest_ts = str((datetime.utcnow() - timedelta(days=SCAN_DAYS)).timestamp())
 
+    # Step 3 — Fetch all channels
     print("Fetching channels...")
     channels = []
     cursor = None
@@ -173,16 +179,18 @@ def run_scan():
 
     print("Found " + str(len(channels)) + " channels")
 
+    # Step 4 — Join all channels
     print("Joining channels...")
     for ch in channels:
         slack_post(LP_BOT_TOKEN, "conversations.join", {"channel": ch["id"]})
 
+    # Step 5 — Fetch messages
     print("Fetching messages...")
     all_messages = []
     skipped_channels = []
 
     for ch in channels:
-        ch_id = ch["id"]
+        ch_id   = ch["id"]
         ch_name = ch["name"]
         ch_messages = []
         cursor = None
@@ -195,6 +203,8 @@ def run_scan():
                 err = data.get("error", "unknown")
                 if err in ("not_in_channel", "channel_not_found", "missing_scope"):
                     skipped_channels.append(ch_name)
+                else:
+                    print("  Error in #" + ch_name + ": " + err)
                 break
             msgs = data.get("messages", [])
             for m in msgs:
@@ -203,11 +213,11 @@ def run_scan():
                 if not m.get("text", "").strip():
                     continue
                 ch_messages.append({
-                    "channel_id": ch_id,
+                    "channel_id":   ch_id,
                     "channel_name": ch_name,
-                    "ts": m["ts"],
-                    "user": m.get("user", ""),
-                    "text": m["text"]
+                    "ts":           m["ts"],
+                    "user":         m.get("user", ""),
+                    "text":         m["text"]
                 })
             if data.get("has_more"):
                 cursor = data.get("response_metadata", {}).get("next_cursor")
@@ -218,6 +228,7 @@ def run_scan():
 
     print("Total messages: " + str(len(all_messages)))
 
+    # Step 6 — Resolve usernames
     print("Resolving usernames...")
     user_cache = {}
     unique_users = set(m["user"] for m in all_messages if m["user"])
@@ -230,6 +241,7 @@ def run_scan():
         else:
             user_cache[uid] = uid
 
+    # Step 7 — Scan messages
     print("Scanning for stake solicitations...")
     flags = []
     for msg in all_messages:
@@ -238,6 +250,7 @@ def run_scan():
             display_name = user_cache.get(msg["user"], msg["user"])
             flags.append({**msg, "display_name": display_name, "confidence": confidence, "reason": reason})
 
+    # Steps 8 + 9 — Build and send alerts
     alerts_sent = 0
     for flag in flags:
         alert_text = build_alert(
@@ -246,25 +259,30 @@ def run_scan():
             flag["ts"], flag["text"],
             flag["confidence"], flag["reason"]
         )
-        sent = send_alert(alert_text)
+        sent   = send_alert(alert_text)
         status = "sent" if sent else "FAILED to send"
-        print("Flag [" + flag["confidence"] + "] #" + flag["channel_name"] + " — " + flag["display_name"] + " — " + status)
+        print("Flag [" + flag["confidence"] + "] #" + flag["channel_name"] +
+              " — " + flag["display_name"] + " — alert " + status)
         if sent:
             alerts_sent += 1
 
+    # Step 10 — Summary
     print("=" * 60)
+    timeframe = "Last " + str(SCAN_DAYS) + " day(s)"
     if flags:
-        print("LP Stake Scan Complete [" + MODE + "]")
-        print("Scanned: " + str(len(channels)) + " channels | " + str(len(all_messages)) + " messages | Last " + str(SCAN_DAYS) + " days")
-        print(str(len(flags)) + " flag(s) found, " + str(alerts_sent) + " alert(s) sent")
+        print("✅ LP Stake Scan Complete [" + MODE + "]")
+        print("Scanned: " + str(len(channels)) + " channels | " +
+              str(len(all_messages)) + " messages | " + timeframe)
+        print("🚨 " + str(len(flags)) + " flag(s) found, " + str(alerts_sent) + " alert(s) sent to #lp-stake-monitor:")
         for f in flags:
             preview = f["text"][:80] + "..." if len(f["text"]) > 80 else f["text"]
-            print("  - #" + f["channel_name"] + " — " + f["display_name"] + " — " + f["confidence"])
+            print("  - #" + f["channel_name"] + " — " + f["display_name"] + " — " + f["confidence"] + " confidence")
             print('    "' + preview + '"')
     else:
-        print("LP Stake Scan Complete [" + MODE + "] — No Violations Found")
-        print("Scanned: " + str(len(channels)) + " channels | " + str(len(all_messages)) + " messages | Last " + str(SCAN_DAYS) + " days")
-        print("No stake solicitation messages detected. Community looks clean.")
+        print("✅ LP Stake Scan Complete [" + MODE + "] — No Violations Found")
+        print("Scanned: " + str(len(channels)) + " channels | " +
+              str(len(all_messages)) + " messages | " + timeframe)
+        print("No stake solicitation messages detected. Community looks clean. 👍")
 
     if skipped_channels:
         print("Skipped (access denied): " + ", ".join(skipped_channels))
